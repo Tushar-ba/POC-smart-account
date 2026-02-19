@@ -1,6 +1,7 @@
 "use client";
 
 import { useUnifiedWallet } from "./hooks/useUnifiedWallet";
+import ConnectButton from "./components/connect-button";
 import LoginCard from "./components/login-card";
 import AccountInfo from "./components/account-info";
 import WalletPortfolio from "./components/wallet-portfolio";
@@ -14,18 +15,23 @@ export default function Home() {
   return (
     <div style={{ minHeight: "100vh", padding: "20px" }}>
       <div style={{ maxWidth: "900px", margin: "0 auto" }}>
-        {/* Header */}
+        {/* Header with Connect Button */}
         <div style={{
-          textAlign: "center",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
           marginBottom: "32px",
           paddingTop: "20px",
         }}>
-          <h1 style={{ fontSize: "24px", fontWeight: "bold", color: "#111" }}>
-            Gasless Transactions POC
-          </h1>
-          <p style={{ color: "#666", fontSize: "14px" }}>
-            Alchemy Embedded Wallets + Smart Accounts + Gas Sponsorship | Base Sepolia
-          </p>
+          <div>
+            <h1 style={{ fontSize: "24px", fontWeight: "bold", color: "#111" }}>
+              Gasless Transactions POC
+            </h1>
+            <p style={{ color: "#666", fontSize: "14px" }}>
+              Smart Accounts + Gas Sponsorship | Base Sepolia
+            </p>
+          </div>
+          <ConnectButton />
         </div>
 
         {isConnected ? (

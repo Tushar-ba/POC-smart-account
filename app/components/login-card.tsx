@@ -10,25 +10,35 @@ export default function LoginCard() {
       display: "flex",
       justifyContent: "center",
       alignItems: "center",
-      minHeight: "80vh",
+      minHeight: "60vh",
     }}>
       <div style={{
         background: "white",
-        borderRadius: "12px",
-        padding: "40px",
+        borderRadius: "16px",
+        padding: "48px 40px",
         boxShadow: "0 4px 20px rgba(0,0,0,0.1)",
         textAlign: "center",
-        maxWidth: "400px",
+        maxWidth: "440px",
         width: "100%",
       }}>
-        <h1 style={{ fontSize: "28px", fontWeight: "bold", marginBottom: "12px" }}>
-          Gasless Transactions POC
-        </h1>
-        <p style={{ color: "#666", marginBottom: "8px" }}>
-          Alchemy Embedded Wallets + Smart Accounts
-        </p>
-        <p style={{ color: "#888", fontSize: "14px", marginBottom: "24px" }}>
-          Base Sepolia Network
+        <div style={{
+          width: "64px",
+          height: "64px",
+          borderRadius: "16px",
+          background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          margin: "0 auto 20px",
+          fontSize: "28px",
+        }}>
+          &#x1F4B0;
+        </div>
+        <h2 style={{ fontSize: "22px", fontWeight: "bold", marginBottom: "8px", color: "#111" }}>
+          Connect Your Wallet
+        </h2>
+        <p style={{ color: "#666", fontSize: "14px", marginBottom: "28px", lineHeight: "1.5" }}>
+          Connect with email, passkey, Google, or MetaMask to get a smart account with gasless transactions.
         </p>
         <button
           onClick={() => openAuthModal()}
@@ -40,15 +50,21 @@ export default function LoginCard() {
             color: "white",
             background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
             border: "none",
-            borderRadius: "8px",
+            borderRadius: "10px",
             cursor: "pointer",
           }}
         >
-          Login with Alchemy
+          Connect Wallet
         </button>
-        <p style={{ color: "#aaa", fontSize: "12px", marginTop: "16px" }}>
-          Email, Passkey, Google, or MetaMask
-        </p>
+        <div style={{ marginTop: "20px", display: "flex", justifyContent: "center", gap: "16px", fontSize: "12px", color: "#999" }}>
+          <span>Email</span>
+          <span>&bull;</span>
+          <span>Passkey</span>
+          <span>&bull;</span>
+          <span>Google</span>
+          <span>&bull;</span>
+          <span>MetaMask</span>
+        </div>
       </div>
     </div>
   );
