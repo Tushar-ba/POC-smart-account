@@ -1,48 +1,17 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
-import {
-  useSmartAccountClient,
-  useSendUserOperation,
-} from "@account-kit/react";
+import { useCallback, useState } from "react";
 import { encodeFunctionData } from "viem";
 import { MUSICAL_TOKEN_ABI, MUSICAL_TOKEN_ADDRESS } from "@/lib/constants";
 import { useUnifiedWallet } from "../hooks/useUnifiedWallet";
 
 export default function SetApproval() {
-  const { isConnected, connectionType, sendGaslessTransaction } = useUnifiedWallet();
-
-  // For embedded wallet path
-  const { client: embeddedClient } = useSmartAccountClient({});
+  const { isConnected, sendGaslessTransaction } = useUnifiedWallet();
 
   const [operatorAddress, setOperatorAddress] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string>();
   const [txHash, setTxHash] = useState<string>();
-
-  const handleEmbeddedSuccess = useCallback(({ hash }: { hash: string }) => {
-    setIsLoading(false);
-    setError(undefined);
-    setTxHash(hash);
-  }, []);
-
-  const handleEmbeddedError = useCallback((err: Error) => {
-    console.error("Approval error:", err);
-    setIsLoading(false);
-    setError(err.message || "Failed to set approval");
-  }, []);
-
-  const { sendUserOperationResult, sendUserOperation } = useSendUserOperation({
-    client: embeddedClient,
-    waitForTxn: true,
-    onError: handleEmbeddedError,
-    onSuccess: handleEmbeddedSuccess,
-    onMutate: () => {
-      setIsLoading(true);
-      setError(undefined);
-      setTxHash(undefined);
-    },
-  });
 
   const handleSetApproval = useCallback(async () => {
     if (!isConnected) {
@@ -60,46 +29,34 @@ export default function SetApproval() {
       return;
     }
 
-    const data = encodeFunctionData({
-      abi: MUSICAL_TOKEN_ABI,
-      functionName: "setApprovalForAll",
-      args: [operatorAddress as `0x${string}`, true],
-    });
+    setIsLoading(true);
+    setError(undefined);
+    setTxHash(undefined);
 
     try {
-      if (connectionType === "eoa") {
-        setIsLoading(true);
-        setError(undefined);
-        setTxHash(undefined);
+      const data = encodeFunctionData({
+        abi: MUSICAL_TOKEN_ABI,
+        functionName: "setApprovalForAll",
+        args: [operatorAddress as `0x${string}`, true],
+      });
 
-        const hash = await sendGaslessTransaction({
-          target: MUSICAL_TOKEN_ADDRESS,
-          data,
-          value: BigInt(0),
-        });
+      const hash = await sendGaslessTransaction({
+        target: MUSICAL_TOKEN_ADDRESS,
+        data,
+        value: BigInt(0),
+      });
 
-        setIsLoading(false);
-        setTxHash(hash);
-      } else {
-        sendUserOperation({
-          uo: {
-            target: MUSICAL_TOKEN_ADDRESS,
-            data,
-            value: BigInt(0),
-          },
-        });
-      }
+      setTxHash(hash);
     } catch (err: any) {
-      setIsLoading(false);
       setError(err.message || "Failed to set approval");
+    } finally {
+      setIsLoading(false);
     }
-  }, [isConnected, connectionType, sendUserOperation, sendGaslessTransaction, operatorAddress]);
+  }, [isConnected, sendGaslessTransaction, operatorAddress]);
 
-  const transactionUrl = useMemo(() => {
-    const hash = txHash ?? sendUserOperationResult?.hash;
-    if (!hash) return undefined;
-    return `https://sepolia.basescan.org/tx/${hash}`;
-  }, [txHash, sendUserOperationResult?.hash]);
+  const transactionUrl = txHash
+    ? `https://sepolia.basescan.org/tx/${txHash}`
+    : undefined;
 
   return (
     <div style={{

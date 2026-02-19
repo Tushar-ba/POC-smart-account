@@ -45,7 +45,7 @@ export default function AccountInfo() {
       <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
         <InfoRow label="Status" value={isConnected ? "Connected ✅" : "Disconnected"} />
         <InfoRow label="Login Method" value={loginMethod} />
-        <InfoRow label="Connection Type" value={connectionType === "embedded" ? "Embedded Wallet → Smart Account" : "External Wallet (EOA) → Smart Account"} />
+        <InfoRow label="Connection Type" value={connectionType === "embedded" ? "Embedded Wallet → Smart Account (SCA)" : "External Wallet → Smart Account (EIP-7702)"} />
         <InfoRow label="Email" value={email ?? "N/A"} />
         {signerAddress && (
           <InfoRow
@@ -60,7 +60,8 @@ export default function AccountInfo() {
           mono
         />
         <InfoRow label="Chain" value="Base Sepolia (84532)" />
-        <InfoRow label="Account Type" value={connectionType === "eoa" ? "Smart Wallet (via Wallet API)" : "Modular Account (v2)"} />
+        <InfoRow label="Account Type" value={connectionType === "eoa" ? "EIP-7702 (EOA = Smart Account)" : "SCA (via Wallet API)"} />
+        <InfoRow label="Transaction Engine" value="createSmartWalletClient → sendCalls() + Paymaster" />
 
         {error && (
           <div style={{
@@ -84,9 +85,9 @@ export default function AccountInfo() {
           border: "1px solid #bbf7d0",
         }}>
           <p style={{ fontSize: "13px", color: "#166534" }}>
-            ✨ Whether you logged in via email, Google, passkey, or <strong>MetaMask</strong>,
-            you get a <strong>smart account</strong>.
-            All transactions are <strong>gasless</strong> via gas sponsorship.
+            ✨ Both paths use <strong>createSmartWalletClient</strong> → <strong>sendCalls()</strong> with paymaster.
+            EOA wallets get <strong>EIP-7702 delegation</strong> (auto, user just signs).
+            All transactions are <strong>gasless</strong> — paymaster sponsors everything including delegation.
           </p>
         </div>
       </div>

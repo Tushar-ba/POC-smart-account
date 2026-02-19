@@ -1,10 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
-import {
-  useSmartAccountClient,
-  useSendUserOperation,
-} from "@account-kit/react";
+import { useCallback, useState } from "react";
 import { encodeFunctionData, parseEther } from "viem";
 import { MUSICAL_TOKEN_ABI, MUSICAL_TOKEN_ADDRESS } from "@/lib/constants";
 import { useUnifiedWallet } from "../hooks/useUnifiedWallet";
@@ -12,14 +8,9 @@ import { useUnifiedWallet } from "../hooks/useUnifiedWallet";
 export default function MintAndList() {
   const {
     isConnected,
-    connectionType,
     smartAccountAddress,
-    signerAddress,
     sendGaslessTransaction,
   } = useUnifiedWallet();
-
-  // For embedded wallet path, we still use useSendUserOperation
-  const { client: embeddedClient } = useSmartAccountClient({});
 
   const [tokenURI, setTokenURI] = useState("ipfs://QmExample/metadata.json");
   const [price, setPrice] = useState("0.001");
@@ -36,32 +27,7 @@ export default function MintAndList() {
   const [error, setError] = useState<string>();
   const [txHash, setTxHash] = useState<string>();
 
-  // Embedded wallet path: useSendUserOperation
-  const handleEmbeddedSuccess = useCallback(({ hash }: { hash: string }) => {
-    setIsMinting(false);
-    setError(undefined);
-    setTxHash(hash);
-  }, []);
-
-  const handleEmbeddedError = useCallback((err: Error) => {
-    console.error("MintAndList error:", err);
-    setIsMinting(false);
-    setError(err.message || "Failed to execute mintAndList");
-  }, []);
-
-  const { sendUserOperationResult, sendUserOperation } = useSendUserOperation({
-    client: embeddedClient,
-    waitForTxn: true,
-    onError: handleEmbeddedError,
-    onSuccess: handleEmbeddedSuccess,
-    onMutate: () => {
-      setIsMinting(true);
-      setError(undefined);
-      setTxHash(undefined);
-    },
-  });
-
-  // Build the encoded call data (shared by both paths)
+  // Build the encoded call data
   const buildCallData = useCallback(() => {
     const ownerAddr = smartAccountAddress;
     if (!ownerAddr) throw new Error("Smart account address not available");
@@ -125,46 +91,33 @@ export default function MintAndList() {
       return;
     }
 
+    setIsMinting(true);
+    setError(undefined);
+    setTxHash(undefined);
+
     try {
       const data = buildCallData();
 
-      if (connectionType === "eoa") {
-        // EOA path: use SmartWalletClient.sendCalls
-        setIsMinting(true);
-        setError(undefined);
-        setTxHash(undefined);
+      // Single path for ALL wallet types — sendGaslessTransaction
+      // uses smartWalletClient.sendCalls() with paymaster internally
+      const hash = await sendGaslessTransaction({
+        target: MUSICAL_TOKEN_ADDRESS,
+        data,
+        value: BigInt(0),
+      });
 
-        const hash = await sendGaslessTransaction({
-          target: MUSICAL_TOKEN_ADDRESS,
-          data,
-          value: BigInt(0),
-        });
-
-        setIsMinting(false);
-        setTxHash(hash);
-      } else {
-        // Embedded wallet path: use useSendUserOperation
-        sendUserOperation({
-          uo: {
-            target: MUSICAL_TOKEN_ADDRESS,
-            data,
-            value: BigInt(0),
-          },
-        });
-      }
+      setTxHash(hash);
     } catch (err: any) {
-      setIsMinting(false);
+      console.error("MintAndList error:", err);
       setError(err.message || "Failed to execute mintAndList");
+    } finally {
+      setIsMinting(false);
     }
-  }, [isConnected, connectionType, buildCallData, sendGaslessTransaction, sendUserOperation]);
+  }, [isConnected, buildCallData, sendGaslessTransaction]);
 
-  const transactionUrl = useMemo(() => {
-    const hash = txHash ?? sendUserOperationResult?.hash;
-    if (!hash) return undefined;
-    return `https://sepolia.basescan.org/tx/${hash}`;
-  }, [txHash, sendUserOperationResult?.hash]);
-
-  const displayHash = txHash ?? sendUserOperationResult?.hash;
+  const transactionUrl = txHash
+    ? `https://sepolia.basescan.org/tx/${txHash}`
+    : undefined;
 
   return (
     <div style={{
@@ -177,8 +130,7 @@ export default function MintAndList() {
         Gasless mintAndList
       </h2>
       <p style={{ fontSize: "13px", color: "#666", marginBottom: "16px" }}>
-        Mint MusicalToken ERC-1155 NFTs and auto-list on marketplace — <strong>zero gas fees</strong> via ERC-4337 gas sponsorship.
-        Anyone can call this function.
+        Mint MusicalToken ERC-1155 NFTs and auto-list on marketplace — <strong>zero gas fees</strong> via gas sponsorship.
       </p>
 
       <div style={{
@@ -279,7 +231,7 @@ export default function MintAndList() {
           cursor: isMinting ? "not-allowed" : "pointer",
         }}
       >
-        {isMinting ? "⏳ Sending UserOp (gasless)..." : "🚀 Mint & List (Gasless)"}
+        {isMinting ? "Sending transaction (gasless)..." : "Mint & List (Gasless)"}
       </button>
 
       {/* Error display */}
@@ -313,7 +265,7 @@ export default function MintAndList() {
             Transaction Hash:
           </p>
           <code style={{ fontSize: "12px", wordBreak: "break-all", color: "#333" }}>
-            {displayHash}
+            {txHash}
           </code>
           <br />
           <a

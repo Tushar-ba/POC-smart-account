@@ -11,12 +11,10 @@ import {
   type PropsWithChildren,
 } from "react";
 import {
-  useSmartAccountClient,
   useSignerStatus,
   useLogout,
   useUser,
   useSigner,
-  useSendUserOperation,
   useAlchemyAccountContext,
   useAuthModal,
 } from "@account-kit/react";
@@ -27,7 +25,7 @@ import {
   type SmartWalletClient,
 } from "@account-kit/wallet-client";
 import { alchemy, baseSepolia } from "@account-kit/infra";
-import { hashMessage, type Hex } from "viem";
+import { type Hex } from "viem";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -47,129 +45,173 @@ interface UnifiedWalletContextValue {
   loginMethod: string;
   email: string | null;
 
-  // Actions
+  // Actions — unified for ALL wallet types via createSmartWalletClient
   signMessage: (message: string) => Promise<Hex>;
   sendGaslessTransaction: (params: {
     target: `0x${string}`;
     data: `0x${string}`;
     value?: bigint;
-  }) => Promise<string>; // returns tx hash or call ID
+  }) => Promise<string>;
   logout: () => void;
 
-  // For advanced use: the raw clients
-  smartAccountClient: any | undefined; // embedded path
-  smartWalletClient: SmartWalletClient<`0x${string}`> | null; // EOA path
+  // The single SmartWalletClient (works for both embedded + EOA)
+  smartWalletClient: SmartWalletClient | null;
 
   // Error state
   error: string | null;
 }
 
-const UnifiedWalletContext = createContext<UnifiedWalletContextValue | null>(null);
+const UnifiedWalletContext = createContext<UnifiedWalletContextValue | null>(
+  null
+);
 
 // ─── Provider ────────────────────────────────────────────────────────────────
+//
+// Architecture:
+//   1. User connects (email/passkey/Google OR MetaMask)
+//   2. We get a signer from either path
+//   3. We create ONE SmartWalletClient using createSmartWalletClient()
+//   4. For EOA → EIP-7702: signer address = smart account (auto-delegates)
+//   5. For Embedded → SCA: requestAccount() creates smart contract account
+//   6. ALL transactions go through smartWalletClient.sendCalls() with paymaster
+//   7. User just signs — gas is sponsored by Alchemy Gas Manager
+//
 
 export function UnifiedWalletProvider({ children }: PropsWithChildren) {
   const { config } = useAlchemyAccountContext();
   const wagmiConfig = config._internal.wagmiConfig;
 
-  // --- Embedded wallet path ---
+  // --- Embedded wallet ---
   const signerStatus = useSignerStatus();
-  const { client: embeddedClient } = useSmartAccountClient({});
   const alchemyUser = useUser();
   const alchemySigner = useSigner();
   const { logout: alchemyLogout } = useLogout();
 
-  // --- EOA path (wagmi) ---
+  // --- EOA wallet (wagmi) ---
   const { isConnected: eoaIsConnected, address: eoaAddress } = useAccount({
     config: wagmiConfig,
   });
   const { data: walletClient } = useWalletClient({ config: wagmiConfig });
-  const { disconnect: wagmiDisconnect } = useDisconnect({ config: wagmiConfig });
+  const { disconnect: wagmiDisconnect } = useDisconnect({
+    config: wagmiConfig,
+  });
 
   // --- Auth modal (close when EOA connects) ---
   const { closeAuthModal, isOpen: isAuthModalOpen } = useAuthModal();
 
-  // Auto-close the auth modal when EOA connects
   useEffect(() => {
     if (eoaIsConnected && isAuthModalOpen && !signerStatus.isConnected) {
-      // EOA just connected through the auth modal — close it
       closeAuthModal();
     }
-  }, [eoaIsConnected, isAuthModalOpen, signerStatus.isConnected, closeAuthModal]);
+  }, [
+    eoaIsConnected,
+    isAuthModalOpen,
+    signerStatus.isConnected,
+    closeAuthModal,
+  ]);
 
-  // --- Smart Wallet Client for EOA ---
-  const [smartWalletClient, setSmartWalletClient] = useState<SmartWalletClient<`0x${string}`> | null>(null);
-  const [eoaSmartAccountAddress, setEoaSmartAccountAddress] = useState<string | undefined>();
-  const [eoaLoading, setEoaLoading] = useState(false);
-  const [eoaError, setEoaError] = useState<string | null>(null);
-  const setupRef = useRef(false);
+  // --- Single SmartWalletClient for ALL paths ---
+  const [smartWalletClient, setSmartWalletClient] =
+    useState<SmartWalletClient | null>(null);
+  const [smartAccountAddress, setSmartAccountAddress] = useState<
+    string | undefined
+  >();
+  const [loading, setLoading] = useState(false);
+  const [walletError, setWalletError] = useState<string | null>(null);
+  const setupRef = useRef<"idle" | "in-progress" | "done">("idle");
 
-  // Create SmartWalletClient when EOA connects
+  // Determine which signer is available
+  const hasEmbeddedSigner = signerStatus.isConnected && !!alchemySigner;
+  const hasEoaSigner =
+    eoaIsConnected && !!walletClient && !signerStatus.isConnected;
+
+  // Create SmartWalletClient from whichever signer is available
   useEffect(() => {
-    if (!eoaIsConnected || !walletClient || signerStatus.isConnected) {
-      // If embedded wallet is connected, or EOA disconnected, reset EOA state
-      if (!eoaIsConnected) {
+    if (!hasEmbeddedSigner && !hasEoaSigner) {
+      // No signer — reset
+      if (!signerStatus.isConnected && !eoaIsConnected) {
         setSmartWalletClient(null);
-        setEoaSmartAccountAddress(undefined);
-        setupRef.current = false;
+        setSmartAccountAddress(undefined);
+        setupRef.current = "idle";
       }
       return;
     }
 
-    // Already set up or in progress
-    if (setupRef.current) return;
-    setupRef.current = true;
+    if (setupRef.current !== "idle") return;
+    setupRef.current = "in-progress";
 
     const setup = async () => {
-      setEoaLoading(true);
-      setEoaError(null);
+      setLoading(true);
+      setWalletError(null);
       try {
         const apiKey = process.env.NEXT_PUBLIC_ALCHEMY_API_KEY;
         const policyId = process.env.NEXT_PUBLIC_ALCHEMY_POLICY_ID;
-
-        if (!apiKey || !policyId) {
+        if (!apiKey || !policyId)
           throw new Error("Missing ALCHEMY_API_KEY or POLICY_ID env vars");
-        }
 
-        const signer = new WalletClientSigner(walletClient, "external");
         const transport = alchemy({ apiKey });
 
-        // Create initial client without account
-        const clientWithoutAccount = createSmartWalletClient({
-          transport,
-          chain: baseSepolia,
-          signer,
-          policyId,
-        });
+        if (hasEoaSigner) {
+          // ─── EOA Path (EIP-7702) ─────────────────────────────────
+          // The EOA address itself becomes the smart account.
+          // sendCalls() auto-detects if EIP-7702 delegation is needed
+          // and bundles it with the first transaction. User just signs.
+          // The paymaster sponsors ALL gas including the delegation tx.
+          const signer = new WalletClientSigner(walletClient!, "external");
 
-        // Request the smart account (creates or retrieves existing)
-        const account = await clientWithoutAccount.requestAccount();
-        console.log("EOA Smart Account created:", account.address);
+          const client = createSmartWalletClient({
+            transport,
+            chain: baseSepolia,
+            signer,
+            policyId,
+            account: eoaAddress!, // EOA address = smart account address (EIP-7702)
+          });
 
-        // Create client with account attached
-        const clientWithAccount = createSmartWalletClient({
-          transport,
-          chain: baseSepolia,
-          signer,
-          policyId,
-          account: account.address,
-        });
+          setSmartWalletClient(client as unknown as SmartWalletClient);
+          setSmartAccountAddress(eoaAddress!);
+          console.log("SmartWalletClient created (EOA/EIP-7702):", eoaAddress);
+        } else {
+          // ─── Embedded Path (SCA) ─────────────────────────────────
+          // Alchemy signer → requestAccount() creates a Smart Contract Account.
+          // The signer manages keys, the SCA holds assets.
+          const signer = alchemySigner as any; // AlchemySigner implements SmartAccountSigner
 
-        setSmartWalletClient(clientWithAccount);
-        setEoaSmartAccountAddress(account.address);
+          const clientWithoutAccount = createSmartWalletClient({
+            transport,
+            chain: baseSepolia,
+            signer,
+            policyId,
+          });
+
+          const account = await clientWithoutAccount.requestAccount();
+          console.log("SmartWalletClient created (Embedded/SCA):", account.address);
+
+          const clientWithAccount = createSmartWalletClient({
+            transport,
+            chain: baseSepolia,
+            signer,
+            policyId,
+            account: account.address,
+          });
+
+          setSmartWalletClient(clientWithAccount as unknown as SmartWalletClient);
+          setSmartAccountAddress(account.address);
+        }
+
+        setupRef.current = "done";
       } catch (err: any) {
-        console.error("Failed to create smart wallet for EOA:", err);
-        setEoaError(err.message || "Failed to create smart account");
-        setupRef.current = false;
+        console.error("Failed to create SmartWalletClient:", err);
+        setWalletError(err.message || "Failed to create smart account");
+        setupRef.current = "idle"; // allow retry
       } finally {
-        setEoaLoading(false);
+        setLoading(false);
       }
     };
 
     setup();
-  }, [eoaIsConnected, walletClient, signerStatus.isConnected]);
+  }, [hasEmbeddedSigner, hasEoaSigner, alchemySigner, walletClient, eoaAddress]);
 
-  // --- Determine connection type ---
+  // --- Connection type ---
   const connectionType: ConnectionType | null = useMemo(() => {
     if (signerStatus.isConnected) return "embedded";
     if (eoaIsConnected) return "eoa";
@@ -178,22 +220,7 @@ export function UnifiedWalletProvider({ children }: PropsWithChildren) {
 
   const isConnected = connectionType !== null;
 
-  const isLoading = useMemo(() => {
-    if (connectionType === "eoa") return eoaLoading;
-    return false;
-  }, [connectionType, eoaLoading]);
-
-  // --- Addresses ---
-  const smartAccountAddress = useMemo(() => {
-    if (connectionType === "embedded") {
-      return embeddedClient?.account?.address;
-    }
-    if (connectionType === "eoa") {
-      return eoaSmartAccountAddress;
-    }
-    return undefined;
-  }, [connectionType, embeddedClient, eoaSmartAccountAddress]);
-
+  // --- Signer address ---
   const signerAddress = useMemo(() => {
     if (connectionType === "embedded") {
       return (
@@ -202,9 +229,7 @@ export function UnifiedWalletProvider({ children }: PropsWithChildren) {
         undefined
       );
     }
-    if (connectionType === "eoa") {
-      return eoaAddress;
-    }
+    if (connectionType === "eoa") return eoaAddress;
     return undefined;
   }, [connectionType, alchemySigner, eoaAddress]);
 
@@ -220,23 +245,14 @@ export function UnifiedWalletProvider({ children }: PropsWithChildren) {
 
   const email = alchemyUser?.email ?? null;
 
-  // --- Actions ---
+  // --- Actions (unified — same code for both paths) ---
+
   const signMessage = useCallback(
     async (message: string): Promise<Hex> => {
-      if (connectionType === "embedded" && embeddedClient) {
-        return embeddedClient.signMessage({ message });
-      }
-      if (connectionType === "eoa" && smartWalletClient) {
-        const signerAddr = eoaAddress;
-        if (!signerAddr) throw new Error("No EOA address");
-        return smartWalletClient.signMessage({
-          message,
-          account: signerAddr,
-        });
-      }
-      throw new Error("No wallet connected");
+      if (!smartWalletClient) throw new Error("Wallet not ready");
+      return smartWalletClient.signMessage({ message });
     },
-    [connectionType, embeddedClient, smartWalletClient, eoaAddress]
+    [smartWalletClient]
   );
 
   const sendGaslessTransaction = useCallback(
@@ -245,42 +261,40 @@ export function UnifiedWalletProvider({ children }: PropsWithChildren) {
       data: `0x${string}`;
       value?: bigint;
     }): Promise<string> => {
-      if (connectionType === "eoa" && smartWalletClient) {
-        const signerAddr = eoaAddress;
-        if (!signerAddr) throw new Error("No EOA address");
+      if (!smartWalletClient) throw new Error("Wallet not ready");
 
-        // Use the SmartWalletClient sendCalls method
-        // Account is already set on the client, so no 'from' needed
-        const result = await smartWalletClient.sendCalls({
-          calls: [
-            {
-              to: params.target,
-              data: params.data,
-              value: params.value ? `0x${params.value.toString(16)}` as Hex : "0x0" as Hex,
-            },
-          ],
-          capabilities: {
-            paymasterService: {
-              policyId: process.env.NEXT_PUBLIC_ALCHEMY_POLICY_ID!,
-            },
+      const policyId = process.env.NEXT_PUBLIC_ALCHEMY_POLICY_ID!;
+
+      // sendCalls works the same for both paths:
+      // - EOA: Alchemy auto-detects if EIP-7702 delegation is needed
+      // - Embedded: sends through the SCA
+      // - Paymaster sponsors all gas in both cases
+      const result = await smartWalletClient.sendCalls({
+        from: smartAccountAddress as `0x${string}`,
+        calls: [
+          {
+            to: params.target,
+            data: params.data,
+            value: params.value
+              ? (`0x${params.value.toString(16)}` as Hex)
+              : ("0x0" as Hex),
           },
-        });
+        ],
+        capabilities: {
+          paymasterService: { policyId },
+        },
+      });
 
-        // Wait for the calls to be mined
-        const status = await smartWalletClient.waitForCallsStatus({
-          id: result.id,
-          timeout: 60_000,
-        });
+      // Wait for on-chain confirmation
+      const status = await smartWalletClient.waitForCallsStatus({
+        id: result.id,
+        timeout: 60_000,
+      });
 
-        // Return the tx hash from receipts if available
-        const receipt = (status as any)?.receipts?.[0];
-        return receipt?.transactionHash ?? result.id;
-      }
-
-      // For embedded wallet, we throw here — caller should use useSendUserOperation directly
-      throw new Error("Use useSendUserOperation hook for embedded wallets");
+      const receipt = (status as any)?.receipts?.[0];
+      return receipt?.transactionHash ?? result.id;
     },
-    [connectionType, smartWalletClient, eoaAddress]
+    [smartWalletClient]
   );
 
   const logout = useCallback(() => {
@@ -289,19 +303,17 @@ export function UnifiedWalletProvider({ children }: PropsWithChildren) {
     }
     if (connectionType === "eoa") {
       wagmiDisconnect();
-      setSmartWalletClient(null);
-      setEoaSmartAccountAddress(undefined);
-      setupRef.current = false;
     }
+    setSmartWalletClient(null);
+    setSmartAccountAddress(undefined);
+    setupRef.current = "idle";
   }, [connectionType, alchemyLogout, wagmiDisconnect]);
-
-  const error = eoaError;
 
   const value: UnifiedWalletContextValue = useMemo(
     () => ({
       isConnected,
       connectionType,
-      isLoading,
+      isLoading: loading,
       smartAccountAddress,
       signerAddress,
       loginMethod,
@@ -309,14 +321,13 @@ export function UnifiedWalletProvider({ children }: PropsWithChildren) {
       signMessage,
       sendGaslessTransaction,
       logout,
-      smartAccountClient: embeddedClient,
       smartWalletClient,
-      error,
+      error: walletError,
     }),
     [
       isConnected,
       connectionType,
-      isLoading,
+      loading,
       smartAccountAddress,
       signerAddress,
       loginMethod,
@@ -324,9 +335,8 @@ export function UnifiedWalletProvider({ children }: PropsWithChildren) {
       signMessage,
       sendGaslessTransaction,
       logout,
-      embeddedClient,
       smartWalletClient,
-      error,
+      walletError,
     ]
   );
 
@@ -342,7 +352,9 @@ export function UnifiedWalletProvider({ children }: PropsWithChildren) {
 export function useUnifiedWallet() {
   const ctx = useContext(UnifiedWalletContext);
   if (!ctx) {
-    throw new Error("useUnifiedWallet must be used inside UnifiedWalletProvider");
+    throw new Error(
+      "useUnifiedWallet must be used inside UnifiedWalletProvider"
+    );
   }
   return ctx;
 }

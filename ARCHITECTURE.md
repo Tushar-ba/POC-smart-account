@@ -2,165 +2,258 @@
 
 ## Overview
 
-This POC demonstrates **gasless (sponsored) transactions** on **Base Sepolia** using Alchemy's Account Kit. It supports **two wallet paths** — Alchemy Embedded Wallets and External Wallets (MetaMask) — both of which get smart accounts with gas-sponsored transactions.
+This POC demonstrates **gasless (sponsored) transactions** on **Base Sepolia** using Alchemy's Account Kit. It supports **all wallet types** — Alchemy Embedded Wallets (email, passkey, Google) and External Wallets (MetaMask, WalletConnect) — through a **single unified code path** powered by `createSmartWalletClient`.
+
+**Key insight**: There is no dual-path branching. Both embedded and EOA wallets go through the exact same `createSmartWalletClient → sendCalls() + paymaster` pipeline. Components never need to know which wallet type is connected.
 
 ---
 
 ## High-Level Architecture
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        Next.js Frontend (App Router)                   │
-│                                                                        │
-│  ┌──────────────────┐       ┌──────────────────────────────────────┐   │
-│  │   Auth Modal      │       │   UnifiedWalletProvider (Context)    │   │
-│  │  (Account Kit UI) │       │   - Detects connection type          │   │
-│  │                   │       │   - Manages both wallet paths        │   │
-│  │  • Email          │       │   - Exposes unified API:             │   │
-│  │  • Passkey        │──────▶│     signMessage()                    │   │
-│  │  • Google OAuth   │       │     sendGaslessTransaction()         │   │
-│  │  • MetaMask / WC  │       │     smartAccountAddress              │   │
-│  └──────────────────┘       └──────────┬───────────────────────────┘   │
-│                                         │                              │
-│                          ┌──────────────┴──────────────┐               │
-│                          │                             │               │
-│                    ┌─────▼─────┐              ┌────────▼────────┐      │
-│                    │ EMBEDDED  │              │   EOA PATH      │      │
-│                    │  PATH     │              │   (MetaMask)    │      │
-│                    │           │              │                 │      │
-│                    │ ERC-4337  │              │  EIP-7702       │      │
-│                    │ UserOps   │              │  Delegation     │      │
-│                    └─────┬─────┘              └────────┬────────┘      │
-│                          │                             │               │
-└──────────────────────────┼─────────────────────────────┼───────────────┘
-                           │                             │
-                    ┌──────▼──────┐              ┌───────▼───────┐
-                    │  Alchemy    │              │   Alchemy     │
-                    │  Bundler    │              │   Wallet API  │
-                    │  (ERC-4337) │              │  (EIP-5792)   │
-                    └──────┬──────┘              └───────┬───────┘
-                           │                             │
-                    ┌──────▼──────┐              ┌───────▼───────┐
-                    │  Alchemy    │              │   Alchemy     │
-                    │  Gas Manager│              │   Gas Manager │
-                    │ (Paymaster) │              │  (Paymaster)  │
-                    └──────┬──────┘              └───────┬───────┘
-                           │                             │
-                           └─────────────┬───────────────┘
-                                         │
-                                  ┌──────▼──────┐
-                                  │ Base Sepolia│
-                                  │  (L2 Chain) │
-                                  └─────────────┘
+┌───────────────────────────────────────────────────────────────────────────┐
+│                       Next.js Frontend (App Router)                       │
+│                                                                           │
+│  ┌──────────────────┐      ┌───────────────────────────────────────────┐  │
+│  │   Auth Modal      │      │    UnifiedWalletProvider (Context)        │  │
+│  │  (Account Kit UI) │      │                                          │  │
+│  │                   │      │  1. Detect signer (embedded OR wagmi)     │  │
+│  │  • Email          │      │  2. createSmartWalletClient() ← SINGLE   │  │
+│  │  • Passkey        │─────▶│  3. Expose unified API to components:    │  │
+│  │  • Google OAuth   │      │     • signMessage()                      │  │
+│  │  • MetaMask / WC  │      │     • sendGaslessTransaction()           │  │
+│  └──────────────────┘      │     • smartAccountAddress                 │  │
+│                             └──────────────┬──────────────────────────┘  │
+│                                            │                             │
+│       ┌────────────────────────────────────┼────────────────────┐        │
+│       │    Components (zero branching)      │                    │        │
+│       │                                     │                    │        │
+│       │  mint-and-list.tsx                  │  set-approval.tsx  │        │
+│       │  sign-message.tsx                  │  account-info.tsx  │        │
+│       │                                     │                    │        │
+│       │  All call sendGaslessTransaction() — no connectionType  │        │
+│       │  checks, no if/else, no dual-path logic                 │        │
+│       └─────────────────────────────────────────────────────────┘        │
+│                                            │                             │
+└────────────────────────────────────────────┼─────────────────────────────┘
+                                             │
+                                             ▼
+                              ┌──────────────────────────┐
+                              │  createSmartWalletClient  │
+                              │  (single instance)        │
+                              │                           │
+                              │  • EOA signer → EIP-7702  │
+                              │    (auto-delegates)       │
+                              │  • Embedded signer → SCA  │
+                              │    (requestAccount)       │
+                              └────────────┬─────────────┘
+                                           │
+                                           ▼
+                              ┌──────────────────────────┐
+                              │  smartWalletClient        │
+                              │  .sendCalls({             │
+                              │    calls: [...],          │
+                              │    capabilities: {        │
+                              │      paymasterService: {  │
+                              │        policyId           │
+                              │      }                    │
+                              │    }                      │
+                              │  })                       │
+                              └────────────┬─────────────┘
+                                           │
+                              ┌────────────▼─────────────┐
+                              │  Alchemy Wallet API      │
+                              │  (EIP-5792: sendCalls)   │
+                              │  + Gas Manager (Paymaster)│
+                              └────────────┬─────────────┘
+                                           │
+                              ┌────────────▼─────────────┐
+                              │     Base Sepolia (L2)     │
+                              └──────────────────────────┘
 ```
 
 ---
 
-## Two Wallet Paths Explained
+## Single Unified Path — `createSmartWalletClient`
 
-### Path 1 — Embedded Wallet (ERC-4337)
+The entire architecture revolves around **one function**: `createSmartWalletClient` from `@account-kit/wallet-client`. This is the key API that makes both wallet types work identically.
 
-**Auth Methods**: Email, Passkey, Google OAuth
-
-**How it works**:
-
-1. **User authenticates** via Alchemy's Auth Modal (email OTP, passkey, or Google popup)
-2. **Alchemy creates an embedded signer** — a key pair managed by Alchemy's infrastructure, secured via the user's auth factor (email, passkey, biometrics)
-3. **A Modular Account v2 (smart contract account)** is deployed counterfactually on Base Sepolia. This is an **ERC-4337 compliant** smart account
-4. **Transactions are sent as UserOperations** — not regular Ethereum transactions. The `useSendUserOperation` hook constructs a UserOp containing the contract call
-5. **The Alchemy Gas Manager (Paymaster)** intercepts the UserOp and sponsors the gas. The user pays $0
-6. **The Alchemy Bundler** picks up the UserOp, wraps it into a regular transaction, and submits it on-chain
-7. **The smart account executes** the call (e.g., `mintAndList`) on behalf of the user
-
-**Key packages**: `@account-kit/react` (useSmartAccountClient, useSendUserOperation, useSignerStatus, useUser)
-
-**Account Standard**: ERC-4337 (Account Abstraction via alt mempool)
+### How It Works
 
 ```
-User → Email/Passkey/Google
-  → Alchemy Embedded Signer (manages keys)
-    → Modular Account v2 (ERC-4337 Smart Contract Account)
-      → UserOperation { sender, callData, ... }
-        → Alchemy Paymaster (sponsors gas)
-          → Alchemy Bundler (submits on-chain)
-            → Base Sepolia
+┌─────────────────────────────────────────────────────┐
+│              User connects wallet                     │
+│                                                       │
+│  Email / Passkey / Google    OR    MetaMask / WC     │
+│         │                              │              │
+│         ▼                              ▼              │
+│  alchemySigner              WalletClientSigner        │
+│  (from useSigner)           (wraps wagmi walletClient)│
+│         │                              │              │
+│         └──────────┬───────────────────┘              │
+│                    ▼                                  │
+│     createSmartWalletClient({                         │
+│       transport: alchemy({ apiKey }),                 │
+│       chain: baseSepolia,                             │
+│       signer: <either signer>,                        │
+│       policyId: POLICY_ID,                            │
+│       account: <address>,  // optional for embedded   │
+│     })                                                │
+│                    │                                  │
+│                    ▼                                  │
+│         SmartWalletClient                             │
+│         .sendCalls()    ← same API for BOTH paths    │
+│         .signMessage()  ← same API for BOTH paths    │
+└─────────────────────────────────────────────────────┘
 ```
 
-### Path 2 — External Wallet / EOA (EIP-7702)
+### Embedded Wallet (SCA)
 
-**Auth Methods**: MetaMask, WalletConnect, any injected wallet
+1. User authenticates via email / passkey / Google
+2. `useSigner()` returns the Alchemy embedded signer (manages keys server-side)
+3. `createSmartWalletClient({ signer: alchemySigner, policyId })` — no account yet
+4. `client.requestAccount()` → Alchemy creates/retrieves a **Smart Contract Account** (new address)
+5. Re-create client with `account: sca.address`
+6. Ready: `sendCalls()` sends transactions through the SCA, paymaster sponsors gas
 
-**How it works**:
+**Result**: Signer address ≠ SCA address (two different addresses)
 
-1. **User connects MetaMask** via the Auth Modal's "External Wallets" section
-2. **wagmi detects the EOA** connection (`useAccount`, `useWalletClient` from wagmi)
-3. **We wrap the MetaMask WalletClient** as a `WalletClientSigner` (from `@aa-sdk/core`) — this adapts the EOA into a signer compatible with Alchemy's smart wallet infrastructure
-4. **A SmartWalletClient is created** using `createSmartWalletClient` from `@account-kit/wallet-client`. This uses Alchemy's **Wallet API** which follows **EIP-5792** (`wallet_sendCalls`)
-5. **EIP-7702 delegation occurs**: The first transaction triggers the EOA to delegate execution to a smart wallet implementation. After delegation, the EOA address itself behaves as a smart wallet — **same address, new capabilities**
-6. **Gas sponsorship** is applied via `capabilities.paymasterService.policyId` in the `sendCalls` request
-7. **The Alchemy Wallet API** handles the rest: prepares the calls, applies the paymaster, and submits the transaction
+### External Wallet / EOA (EIP-7702)
 
-**Key packages**: `@account-kit/wallet-client` (createSmartWalletClient), `@aa-sdk/core` (WalletClientSigner), `wagmi` (useAccount, useWalletClient)
+1. User connects MetaMask via Auth Modal or WalletConnect
+2. wagmi `useWalletClient()` returns the viem `WalletClient`
+3. Wrap: `new WalletClientSigner(walletClient, "external")` (from `@aa-sdk/core`)
+4. `createSmartWalletClient({ signer, policyId, account: eoaAddress })` — EOA address IS the smart account
+5. Ready: `sendCalls()` auto-detects if **EIP-7702 delegation** is needed, bundles it with the first tx
+6. User just signs once — the delegation + actual call happen atomically
 
-**Account Standard**: EIP-7702 (EOA delegation to smart wallet code)
+**Result**: EOA address = Smart Account address (same address, upgraded capabilities)
+
+### What is EIP-7702 Delegation?
+
+EIP-7702 allows an EOA to **temporarily delegate** its execution to a smart contract implementation. On the first call:
+- The delegation transaction is bundled with the user's actual transaction
+- The EOA's address doesn't change — it just gains smart account capabilities
+- The paymaster sponsors the delegation gas too — user pays nothing
+- After delegation, subsequent calls work directly (no repeated delegation)
+
+---
+
+## Where This Happens in Code
+
+### Core: `useUnifiedWallet.tsx` (app/hooks/)
+
+This is the **single source of truth** for all wallet logic:
 
 ```
-User → MetaMask (EOA)
-  → WalletClientSigner (wraps WalletClient)
-    → SmartWalletClient (Wallet API)
-      → requestAccount() — creates/retrieves smart account
-      → sendCalls({ calls, capabilities.paymasterService })
-        → EIP-7702 delegation (EOA → Smart Wallet impl)
-          → Alchemy Wallet API (prepares + sponsors + submits)
-            → Base Sepolia
+File: app/hooks/useUnifiedWallet.tsx
+│
+├── Lines 1-30:    Imports (createSmartWalletClient, WalletClientSigner, etc.)
+├── Lines 76-82:   Architecture comment explaining the single-path design
+├── Lines 83-100:  Hook setup — embedded signer + wagmi EOA detection
+├── Lines 102-110: Auto-close auth modal when EOA connects
+├── Lines 120-127: Signer detection:
+│                    hasEmbeddedSigner = signerStatus.isConnected && !!alchemySigner
+│                    hasEoaSigner = eoaIsConnected && !!walletClient && !signerStatus.isConnected
+│
+├── Lines 131-200: █ SmartWalletClient creation (the KEY code) █
+│   ├── Lines 152-167: EOA path:
+│   │     signer = new WalletClientSigner(walletClient, "external")
+│   │     client = createSmartWalletClient({ signer, policyId, account: eoaAddress })
+│   │
+│   └── Lines 169-188: Embedded path:
+│         client = createSmartWalletClient({ signer: alchemySigner, policyId })
+│         account = await client.requestAccount()
+│         client = createSmartWalletClient({ ..., account: account.address })
+│
+├── Lines 241-248: signMessage() — smartWalletClient.signMessage({ message })
+├── Lines 252-283: █ sendGaslessTransaction() █ — the UNIFIED transaction path:
+│                    smartWalletClient.sendCalls({
+│                      from: smartAccountAddress,
+│                      calls: [{ to, data, value }],
+│                      capabilities: { paymasterService: { policyId } }
+│                    })
+│                    → waitForCallsStatus() → return txHash
+│
+└── Lines 285-300: logout() — alchemyLogout or wagmiDisconnect + reset state
+```
+
+### Components: Zero dual-path logic
+
+**mint-and-list.tsx** (app/components/):
+```typescript
+// Line 86-105 — the ONLY transaction code. No connectionType check.
+const hash = await sendGaslessTransaction({
+  target: MUSICAL_TOKEN_ADDRESS,
+  data,         // encodeFunctionData for mintAndList
+  value: BigInt(0),
+});
+```
+
+**set-approval.tsx** (app/components/):
+```typescript
+// Line 36-54 — identical pattern. Just calls sendGaslessTransaction.
+const hash = await sendGaslessTransaction({
+  target: MUSICAL_TOKEN_ADDRESS,
+  data,         // encodeFunctionData for setApprovalForAll
+  value: BigInt(0),
+});
+```
+
+**sign-message.tsx** (app/components/):
+```typescript
+// Calls signMessage() from unified hook — works for both wallet types
+const signature = await signMessage(message);
+```
+
+**account-info.tsx** (app/components/):
+```typescript
+// Displays "Transaction Engine: createSmartWalletClient → sendCalls() + Paymaster"
+// Shows EIP-7702 or SCA label based on connectionType (display only, not logic)
 ```
 
 ---
 
-## ERC-4337 vs EIP-7702 — Key Differences
+## Embedded vs EOA — Differences (Under the Hood)
 
-| Feature | ERC-4337 (Embedded) | EIP-7702 (EOA/MetaMask) |
+Even though components see a single API, the underlying account types differ:
+
+| Feature | Embedded (SCA) | EOA (EIP-7702) |
 |---|---|---|
-| **Account Type** | New smart contract account (different address from signer) | EOA itself becomes smart (same address) |
-| **Address** | Counterfactual SCA address | MetaMask EOA address = smart account address |
-| **Transaction Format** | UserOperation (alt mempool) | Regular transaction with delegation |
-| **Gas Sponsorship** | Paymaster in UserOp | PaymasterService capability in sendCalls |
-| **Infrastructure** | Bundler + EntryPoint + Paymaster | Wallet API + Paymaster |
-| **Key Management** | Alchemy manages keys (embedded signer) | User manages keys (MetaMask/hardware wallet) |
-| **First Tx** | Deploys SCA (initCode in first UserOp) | Sets EIP-7702 designation on EOA |
-| **SDK Hook** | `useSendUserOperation` | `smartWalletClient.sendCalls()` |
-| **EIP Standard** | EIP-4337 | EIP-7702 + EIP-5792 |
+| **Account Type** | Smart Contract Account (new address) | EOA itself becomes smart (same address) |
+| **Address** | SCA address (different from signer) | EOA address = Smart Account address |
+| **Key Management** | Alchemy manages keys (embedded signer) | User manages keys (MetaMask) |
+| **First Tx** | Deploys SCA (done by `requestAccount()`) | Sets EIP-7702 delegation (auto, bundled) |
+| **SDK Call** | `createSmartWalletClient → sendCalls()` | `createSmartWalletClient → sendCalls()` |
+| **Gas Sponsorship** | `capabilities.paymasterService.policyId` | `capabilities.paymasterService.policyId` |
+| **Component Code** | `sendGaslessTransaction(...)` | `sendGaslessTransaction(...)` |
+
+**The bottom three rows are identical** — that's the whole point of the unified architecture.
 
 ---
 
 ## Gas Sponsorship (Paymaster)
 
-Both paths use the **Alchemy Gas Manager** for gas sponsorship:
+Both paths use the **Alchemy Gas Manager** via the same mechanism:
 
 - **Policy ID**: Configured in `.env.local` as `NEXT_PUBLIC_ALCHEMY_POLICY_ID`
-- **How it works**: Alchemy fronts the gas cost. The policy defines which transactions are eligible for sponsorship (contract addresses, methods, limits, etc.)
-- **Billing**: Alchemy sponsors gas on-chain and bills the developer in USD (monthly invoice)
+- **How it works**: Alchemy fronts the gas cost on-chain. The policy defines which transactions are eligible (contract addresses, methods, limits, etc.)
+- **Billing**: Alchemy sponsors gas and bills the developer in USD (monthly invoice)
 - **User experience**: User pays $0 gas. Clicks "Mint" and the transaction goes through
 
-### Embedded Path Sponsorship
-```typescript
-// Gas policy is set globally in config.ts
-createConfig({
-  policyId: SPONSORSHIP_POLICY_ID,
-  // ...
-});
+### Single Sponsorship Code (Both Paths)
 
-// UserOps automatically use the paymaster
-sendUserOperation({
-  uo: { target, data, value },
-});
-```
-
-### EOA Path Sponsorship
 ```typescript
-// Policy applied per-call via capabilities
+// This EXACT code runs for both embedded and EOA wallets
 smartWalletClient.sendCalls({
-  calls: [{ to, data, value }],
+  from: smartAccountAddress,
+  calls: [
+    {
+      to: contractAddress,
+      data: encodedCallData,
+      value: "0x0",
+    },
+  ],
   capabilities: {
     paymasterService: {
       policyId: process.env.NEXT_PUBLIC_ALCHEMY_POLICY_ID,
@@ -169,46 +262,48 @@ smartWalletClient.sendCalls({
 });
 ```
 
+For EOA wallets, the paymaster also sponsors the EIP-7702 delegation transaction (first tx only). The user never pays for anything.
+
 ---
 
-## UnifiedWalletProvider — The Bridge
+## UnifiedWalletProvider — The Single Context
 
-The `UnifiedWalletProvider` (in `app/hooks/useUnifiedWallet.tsx`) is the central piece that unifies both paths:
+The `UnifiedWalletProvider` (in `app/hooks/useUnifiedWallet.tsx`) wraps the entire app and provides one context:
 
 ```
                     UnifiedWalletProvider
-                    ┌─────────────────────────────┐
-                    │                             │
-                    │  Detects connection type:    │
-                    │  ┌──────────────────────┐   │
-                    │  │ useSignerStatus()    │───▶ isConnected? → "embedded"
-                    │  │ (Alchemy signer)     │   │
-                    │  └──────────────────────┘   │
-                    │  ┌──────────────────────┐   │
-                    │  │ useAccount()          │───▶ isConnected? → "eoa"
-                    │  │ (wagmi/MetaMask)     │   │
-                    │  └──────────────────────┘   │
-                    │                             │
-                    │  Unified API:                │
-                    │  • isConnected              │
-                    │  • connectionType            │
-                    │  • smartAccountAddress       │
-                    │  • signerAddress             │
-                    │  • signMessage()             │
-                    │  • sendGaslessTransaction()  │
-                    │  • logout()                  │
-                    └─────────────────────────────┘
+                    ┌────────────────────────────────────────┐
+                    │                                        │
+                    │  Step 1: Detect which signer exists    │
+                    │  ┌──────────────────────────┐          │
+                    │  │ useSignerStatus()        │──▶ embedded?
+                    │  │ useSigner()              │          │
+                    │  └──────────────────────────┘          │
+                    │  ┌──────────────────────────┐          │
+                    │  │ useAccount() (wagmi)     │──▶ eoa?  │
+                    │  │ useWalletClient()        │          │
+                    │  └──────────────────────────┘          │
+                    │                                        │
+                    │  Step 2: Create ONE SmartWalletClient  │
+                    │  ┌──────────────────────────┐          │
+                    │  │ createSmartWalletClient({ │          │
+                    │  │   signer: <any signer>,  │          │
+                    │  │   policyId,              │          │
+                    │  │   account: <address>,    │          │
+                    │  │ })                       │          │
+                    │  └──────────────────────────┘          │
+                    │                                        │
+                    │  Step 3: Expose unified API             │
+                    │  • isConnected                         │
+                    │  • connectionType (display only)        │
+                    │  • smartAccountAddress                  │
+                    │  • signMessage()                        │
+                    │  • sendGaslessTransaction()             │
+                    │  • logout()                             │
+                    └────────────────────────────────────────┘
 ```
 
-**Priority**: If both are somehow connected, embedded takes priority (checked first).
-
-**EOA Smart Account Setup Flow**:
-1. wagmi detects MetaMask connection
-2. `useWalletClient()` returns the viem `WalletClient`
-3. Wrap it: `new WalletClientSigner(walletClient, "external")`
-4. Create: `createSmartWalletClient({ transport, chain, signer, policyId })`
-5. Request account: `client.requestAccount()` → returns `{ address }`
-6. Store the smart account address and client in state
+**Priority**: If both signers exist, embedded takes priority.
 
 ---
 
@@ -223,13 +318,13 @@ gasless-poc/
 │   ├── page.tsx                      # Main page (login vs dashboard)
 │   ├── providers.tsx                 # Provider tree: Query > Alchemy > UnifiedWallet
 │   ├── hooks/
-│   │   └── useUnifiedWallet.tsx      # Unified wallet context (both paths)
+│   │   └── useUnifiedWallet.tsx      # ★ Unified wallet context (single SmartWalletClient)
 │   └── components/
 │       ├── login-card.tsx            # Auth trigger button
 │       ├── account-info.tsx          # Smart account details display
-│       ├── sign-message.tsx          # Sign arbitrary messages (both paths)
-│       ├── mint-and-list.tsx         # Gasless mintAndList (both paths)
-│       ├── set-approval.tsx          # Gasless setApprovalForAll (both paths)
+│       ├── sign-message.tsx          # Sign arbitrary messages
+│       ├── mint-and-list.tsx         # Gasless mintAndList
+│       ├── set-approval.tsx          # Gasless setApprovalForAll
 │       └── wallet-portfolio.tsx      # NFT & token balance display (Alchemy APIs)
 ├── lib/
 │   ├── constants.ts                  # Contract ABIs and addresses
@@ -243,9 +338,8 @@ gasless-poc/
 
 | API | Endpoint | Purpose |
 |-----|----------|---------|
-| **Smart Wallets** | Account Kit SDK | Embedded wallet creation, smart accounts |
-| **Wallet API** | `createSmartWalletClient` | EIP-7702 smart accounts for EOA |
-| **Gas Manager** | Paymaster (via Policy ID) | Sponsor gas fees |
+| **Wallet API** | `createSmartWalletClient` → `sendCalls()` | Smart accounts for ALL wallet types |
+| **Gas Manager** | Paymaster (via Policy ID in `sendCalls` capabilities) | Sponsor gas fees |
 | **NFT API v3** | `GET /nft/v3/{apiKey}/getNFTsForOwner` | Display user's NFTs |
 | **Token API** | `POST /v2/{apiKey}` → `alchemy_getTokenBalances` | Display ERC-20 token balances |
 | **eth_getBalance** | Standard JSON-RPC | Native ETH balance |
@@ -273,40 +367,61 @@ gasless-poc/
 
 ## Flow Diagrams
 
-### Login → Gasless Transaction (Embedded)
+### Gasless Transaction — Embedded Wallet (Email / Passkey / Google)
 
 ```
 1. User clicks "Sign In"
 2. Auth Modal opens (email / passkey / Google)
 3. User authenticates
-4. useSignerStatus().isConnected = true
-5. useSmartAccountClient() returns Modular Account v2
+4. useSignerStatus().isConnected = true, useSigner() returns alchemySigner
+5. useUnifiedWallet creates SmartWalletClient:
+   a. createSmartWalletClient({ signer: alchemySigner, policyId })
+   b. client.requestAccount() → returns SCA address
+   c. Re-create client with account: sca.address
 6. User fills mintAndList form and clicks "Mint"
-7. useSendUserOperation() constructs UserOp:
-   - sender: smart account address
-   - callData: encodeFunctionData({ abi, functionName: "mintAndList", args })
-8. Alchemy Gas Manager (Paymaster) sponsors gas
-9. Alchemy Bundler submits on-chain
-10. Transaction confirmed — user paid $0
+7. Component calls sendGaslessTransaction({ target, data, value })
+8. Under the hood: smartWalletClient.sendCalls({
+     from: scaAddress,
+     calls: [{ to, data, value }],
+     capabilities: { paymasterService: { policyId } }
+   })
+9. Alchemy Wallet API: prepares call, applies paymaster, submits on-chain
+10. waitForCallsStatus() → transaction confirmed — user paid $0
 ```
 
-### Login → Gasless Transaction (MetaMask)
+### Gasless Transaction — MetaMask / External Wallet (EIP-7702)
 
 ```
 1. User clicks "Sign In"
 2. Auth Modal opens → user clicks "External Wallet" → MetaMask
 3. MetaMask popup → user approves connection
-4. wagmi useAccount().isConnected = true
-5. UnifiedWalletProvider detects EOA, closes auth modal
-6. Creates WalletClientSigner → SmartWalletClient → requestAccount()
-7. EIP-7702 delegation setup (first time only)
-8. User fills mintAndList form and clicks "Mint"
-9. sendGaslessTransaction() calls smartWalletClient.sendCalls():
-   - calls: [{ to: contractAddr, data: encodedCallData }]
-   - capabilities: { paymasterService: { policyId } }
-10. Alchemy Wallet API: prepares, sponsors gas, submits
-11. Transaction confirmed — user paid $0
+4. wagmi useAccount().isConnected = true, useWalletClient() returns walletClient
+5. useUnifiedWallet creates SmartWalletClient:
+   a. signer = new WalletClientSigner(walletClient, "external")
+   b. createSmartWalletClient({ signer, policyId, account: eoaAddress })
+   c. EOA address IS the smart account address (EIP-7702)
+6. User fills mintAndList form and clicks "Mint"
+7. Component calls sendGaslessTransaction({ target, data, value })
+   ← EXACT SAME FUNCTION as embedded path
+8. Under the hood: smartWalletClient.sendCalls({
+     from: eoaAddress,
+     calls: [{ to, data, value }],
+     capabilities: { paymasterService: { policyId } }
+   })
+9. First tx: Alchemy auto-bundles EIP-7702 delegation + contract call
+   Subsequent tx: Just the contract call (delegation already set)
+10. Paymaster sponsors ALL gas (including delegation) — user paid $0
 ```
+
+---
+
+## Previous Architecture (Deprecated)
+
+The earlier version used a dual-path approach:
+- **Embedded**: `useSmartAccountClient()` + `useSendUserOperation()` (ERC-4337 UserOps via Bundler)
+- **EOA**: `createSmartWalletClient()` + `sendCalls()` (EIP-7702 via Wallet API)
+
+This required every component to check `connectionType` and branch between two different transaction APIs. The current unified architecture eliminates all of that — both paths use `createSmartWalletClient` → `sendCalls()`.
 
 ---
 
@@ -314,12 +429,12 @@ gasless-poc/
 
 | Package | Version | Purpose |
 |---------|---------|---------|
-| `@account-kit/react` | ^4.35.1 | Alchemy Account Kit UI + hooks |
+| `@account-kit/react` | ^4.35.1 | Auth modal UI, hooks (useSignerStatus, useSigner, useUser) |
 | `@account-kit/core` | ^4.35.1 | Core Account Kit utilities |
-| `@account-kit/infra` | ^4.35.1 | Alchemy transport, chain configs |
-| `@account-kit/wallet-client` | ^4.35.1 | SmartWalletClient for EIP-7702 |
-| `@aa-sdk/core` | ^4.35.1 | WalletClientSigner adapter |
-| `viem` | ^2.45.0 | ABI encoding, utility types |
-| `wagmi` | ^2.15.4 | EOA wallet connection (MetaMask) |
+| `@account-kit/infra` | ^4.35.1 | Alchemy transport, baseSepolia chain config |
+| `@account-kit/wallet-client` | ^4.35.1 | **`createSmartWalletClient`** — the key API for all wallet types |
+| `@aa-sdk/core` | ^4.35.1 | `WalletClientSigner` — wraps MetaMask as SmartAccountSigner |
+| `viem` | ^2.45.0 | ABI encoding (`encodeFunctionData`), utility types |
+| `wagmi` | ^2.15.4 | EOA wallet connection (MetaMask, WalletConnect) |
 | `@tanstack/react-query` | ^5.50.1 | Async state management |
-| `next` | 14.2.4 | React framework |
+| `next` | 14.2.4 | React framework (App Router) |
